@@ -1,66 +1,101 @@
 import streamlit as st
+import json
+import io
 from google import genai
 from google.genai import types
 from pptx import Presentation
 from pptx.util import Inches
-import json
-import io
 from pypdf import PdfReader
 
 # ---------------------------
 # 1. Gemini Client Setup
 # ---------------------------
-client = genai.Client(
-    api_key=st.secrets["GEMINI_API_KEY"]
-)
+client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 # ---------------------------
-# 2. AI Architect
+# Helper: Safe JSON parsing
 # ---------------------------
-def get_ai_architect_response(notes, user_instructions, image_file=None):
+def safe_json(text):
+    try:
+        return json.loads(text)
+    except:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        return json.loads(text[start:end])
 
-    instructions = """
+# ---------------------------
+# 2. Knowledge Extraction Agent
+# ---------------------------
+def extract_knowledge(text):
+
+    prompt = f"""
+Extract factual knowledge from this content.
+
+Return JSON:
+
+{{
+ "topic":"",
+ "key_concepts":[],
+ "definitions":[],
+ "important_facts":[],
+ "formulas":[],
+ "examples":[]
+}}
+
+Text:
+{text[:8000]}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json")
+    )
+
+    return safe_json(response.text)
+
+
+# ---------------------------
+# 3. Presentation Architect Agent
+# ---------------------------
+def generate_presentation(notes, instructions, image_file=None):
+
+    system = """
 You are a Professional Technical Presentation Architect.
 
-Transform engineering notes into a professional presentation plan.
-
-Rules:
-- Slides must be educational.
-- Avoid generic bullets.
-- Each slide must teach something meaningful.
-- Use professional engineering structure.
+Convert notes into structured slides.
 
 Structure:
-1. Title
-2. Problem Statement
-3. Existing Solutions
-4. Proposed System
-5. System Architecture
-6. Key Components
-7. Advantages
-8. Conclusion
+Title
+Problem
+Existing Solutions
+Proposed System
+Architecture
+Key Components
+Advantages
+Conclusion
 
-Return ONLY JSON:
-
+Return JSON:
 {
-"title": "Presentation Title",
-"image_role": "background | logo | none",
-"slides":[
- {
-  "title":"Slide Title",
-  "bullets":["point1","point2","point3"],
-  "speaker_notes":"optional explanation"
- }
-]
+ "title":"",
+ "image_role":"background | logo | none",
+ "slides":[
+  {
+   "title":"",
+   "bullets":[],
+   "speaker_notes":""
+  }
+ ]
 }
 """
 
     contents = [
         f"Notes: {notes}",
-        f"Design instructions: {user_instructions}"
+        f"Design: {instructions}"
     ]
 
     if image_file:
+        image_file.seek(0)
         contents.append(
             types.Part.from_bytes(
                 data=image_file.read(),
@@ -72,54 +107,26 @@ Return ONLY JSON:
         model="gemini-2.5-flash",
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=instructions,
+            system_instruction=system,
             response_mime_type="application/json"
         )
     )
 
-    return json.loads(response.text)
+    return safe_json(response.text)
+
 
 # ---------------------------
-# 3. Design Suggestions
-# ---------------------------
-def get_design_suggestions(topic):
-
-    prompt = f"""
-Suggest professional design ideas for a PowerPoint about: {topic}
-
-Return JSON:
-
-{{
-"theme_colors": "",
-"background_style": "",
-"font_style": "",
-"visual_elements": ["icons","diagrams","charts"]
-}}
-"""
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
-    )
-
-    return json.loads(response.text)
-
-# ---------------------------
-# 4. Slide Improver
+# 4. Slide Improver Agent
 # ---------------------------
 def improve_slide(text):
 
     prompt = f"""
-Improve the following PowerPoint slide.
+Improve this PowerPoint slide.
 
 Make it:
-- clear
-- concise
-- professional
-- technically strong
+• concise
+• technical
+• professional
 
 Slide:
 {text}
@@ -132,18 +139,49 @@ Slide:
 
     return response.text
 
+
 # ---------------------------
-# 5. Research Mode
+# 5. Design Advisor Agent
+# ---------------------------
+def get_design_suggestions(topic):
+
+    prompt = f"""
+Suggest professional PowerPoint design ideas.
+
+Topic: {topic}
+
+Return JSON:
+
+{{
+ "theme_colors":"",
+ "background_style":"",
+ "font_style":"",
+ "visual_elements":[]
+}}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json")
+    )
+
+    return safe_json(response.text)
+
+
+# ---------------------------
+# 6. Research Mode
 # ---------------------------
 def extract_pdf_text(pdf):
 
     reader = PdfReader(pdf)
+
     text = ""
 
     for page in reader.pages:
-        txt = page.extract_text()
-        if txt:
-            text += txt
+        t = page.extract_text()
+        if t:
+            text += t
 
     return text
 
@@ -151,15 +189,17 @@ def extract_pdf_text(pdf):
 def research_to_slides(text):
 
     prompt = f"""
-Convert this research content into a professional presentation.
+Convert research text into slides.
 
 Structure:
 Title
 Background
 Problem
-Methodology
+Method
 Results
 Conclusion
+
+Return JSON presentation.
 
 Text:
 {text[:8000]}
@@ -168,29 +208,33 @@ Text:
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
+        config=types.GenerateContentConfig(response_mime_type="application/json")
     )
 
-    return json.loads(response.text)
+    return safe_json(response.text)
+
 
 # ---------------------------
-# 6. PPT Builder
+# 7. PPT Builder
 # ---------------------------
 def build_presentation(data, image_file=None):
 
     prs = Presentation()
 
-    role = data.get("image_role", "none").lower()
+    role = data.get("image_role", "none")
 
     image_bytes = None
+
     if image_file:
+        image_file.seek(0)
         image_bytes = image_file.read()
 
     def apply_assets(slide):
 
-        if image_bytes and role == "background":
+        if not image_bytes:
+            return
+
+        if role == "background":
 
             slide.shapes.add_picture(
                 io.BytesIO(image_bytes),
@@ -200,7 +244,7 @@ def build_presentation(data, image_file=None):
                 height=prs.slide_height
             )
 
-        elif image_bytes and role == "logo":
+        elif role == "logo":
 
             slide.shapes.add_picture(
                 io.BytesIO(image_bytes),
@@ -210,39 +254,43 @@ def build_presentation(data, image_file=None):
             )
 
     # Title slide
-    title_slide = prs.slides.add_slide(prs.slide_layouts[0])
-    title_slide.shapes.title.text = data.get("title","Presentation")
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    slide.shapes.title.text = data.get("title", "Presentation")
+    apply_assets(slide)
 
     # Content slides
-    for slide_data in data.get("slides",[]):
+    for s in data.get("slides", []):
 
         slide = prs.slides.add_slide(prs.slide_layouts[1])
 
         apply_assets(slide)
 
-        slide.shapes.title.text = slide_data.get("title","Slide")
+        slide.shapes.title.text = s.get("title", "")
 
         tf = slide.placeholders[1].text_frame
         tf.clear()
 
-        for bullet in slide_data.get("bullets",[]):
-
+        for bullet in s.get("bullets", []):
             p = tf.add_paragraph()
             p.text = bullet
             p.level = 0
 
-        if slide_data.get("speaker_notes"):
+        # speaker notes
+        notes = s.get("speaker_notes")
 
-            slide.notes_slide.notes_text_frame.text = slide_data["speaker_notes"]
+        if notes:
+            slide.notes_slide.notes_text_frame.text = notes
 
     ppt = io.BytesIO()
     prs.save(ppt)
 
     return ppt.getvalue()
 
+
 # ---------------------------
-# 7. Streamlit UI
+# 8. Streamlit UI
 # ---------------------------
+
 st.set_page_config(page_title="AI PPT Architect", layout="wide")
 
 st.title("🏗️ AI Knowledge-Driven PPT Architect")
@@ -250,33 +298,45 @@ st.title("🏗️ AI Knowledge-Driven PPT Architect")
 if "architect_data" not in st.session_state:
     st.session_state.architect_data = None
 
-# ---------------------------
 # Sidebar
-# ---------------------------
 with st.sidebar:
 
     st.header("Create Presentation")
 
     notes = st.text_area("Project Notes")
 
-    design_prompt = st.text_input("Design instructions (bg / logo etc)")
+    design_prompt = st.text_input("Design instructions")
 
-    image_file = st.file_uploader(
-        "Upload optional image",
-        type=["png","jpg","jpeg"]
-    )
+    image_file = st.file_uploader("Upload optional image", type=["png", "jpg", "jpeg"])
+
+    use_kg = st.checkbox("Use Knowledge Extraction")
 
     if st.button("Generate PPT Structure"):
 
         if notes:
 
-            with st.spinner("AI analyzing notes..."):
+            with st.spinner("Processing..."):
 
-                st.session_state.architect_data = get_ai_architect_response(
-                    notes,
-                    design_prompt,
-                    image_file
-                )
+                try:
+
+                    processed_notes = notes
+
+                    if use_kg:
+                        kg = extract_knowledge(notes)
+                        processed_notes = json.dumps(kg, indent=2)
+                        st.session_state.extracted_knowledge = kg
+                    else:
+                        st.session_state.extracted_knowledge = None
+
+                    st.session_state.architect_data = generate_presentation(
+                        processed_notes,
+                        design_prompt,
+                        image_file
+                    )
+
+                except Exception as e:
+
+                    st.error(e)
 
         else:
             st.error("Enter notes first")
@@ -287,69 +347,71 @@ with st.sidebar:
 
     pdf = st.file_uploader("Upload research PDF", type=["pdf"])
 
-    if pdf:
+    if pdf and st.button("Generate Slides from PDF"):
 
-        if st.button("Generate PPT from Research"):
+        with st.spinner("Analyzing research..."):
 
-            text = extract_pdf_text(pdf)
+            try:
 
-            st.session_state.architect_data = research_to_slides(text)
+                text = extract_pdf_text(pdf)
+
+                st.session_state.architect_data = research_to_slides(text)
+
+            except Exception as e:
+
+                st.error(e)
+
 
 # ---------------------------
-# Main workspace
+# 9. Main Workspace
 # ---------------------------
+
 if st.session_state.architect_data:
 
     data = st.session_state.architect_data
 
-    st.header(f"📊 Content Audit: {data.get('title')}")
+    st.header(data.get("title", "Presentation"))
 
-    # design suggestions
-    if st.button("🎨 Get Design Suggestions"):
+    if st.button("Get Design Suggestions"):
 
         suggestions = get_design_suggestions(data.get("title"))
 
-        st.subheader("AI Design Advice")
-
-        st.write("Theme:", suggestions["theme_colors"])
-        st.write("Background:", suggestions["background_style"])
-        st.write("Fonts:", suggestions["font_style"])
-        st.write("Visual Elements:", suggestions["visual_elements"])
+        st.write("Theme:", suggestions.get("theme_colors"))
+        st.write("Background:", suggestions.get("background_style"))
+        st.write("Font:", suggestions.get("font_style"))
+        st.write("Visuals:", suggestions.get("visual_elements"))
 
     st.divider()
 
-    for i, slide in enumerate(data.get("slides",[])):
+    for i, slide in enumerate(data.get("slides", [])):
 
         with st.expander(f"Slide {i+1}: {slide.get('title')}"):
 
-            text = "\n".join(slide.get("bullets",[]))
+            text = "\n".join(slide.get("bullets", []))
 
             edited = st.text_area(
-                "Edit slide content",
-                value=text,
-                key=f"edit{i}"
+                "Edit slide",
+                text,
+                key=f"slide_{i}"
             )
+
+            slide["bullets"] = edited.split("\n")
 
             if st.button(f"Improve Slide {i+1}"):
 
                 improved = improve_slide(edited)
 
-                st.success("AI Improved Version")
-
                 st.write(improved)
 
     st.divider()
 
-    if st.checkbox("I verify the content is correct"):
+    if st.checkbox("I verify content is correct"):
 
-        ppt_file = build_presentation(
-            data,
-            image_file
-        )
+        ppt = build_presentation(data, image_file)
 
         st.download_button(
-            "📥 Download Editable PPT",
-            ppt_file,
+            "Download PPT",
+            ppt,
             file_name="ai_presentation.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
